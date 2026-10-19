@@ -9,7 +9,9 @@
  *   - acks every snapshot, detects seq gaps and sends resync,
  *   - reconnects with 1–2s backoff and resyncs on reconnect,
  *   - switches between "human" and "jev" player modes via {"type":"set_mode"},
- *     with the server snapshot's "mode" key authoritative on the active mode.
+ *     with the server snapshot's "mode" key authoritative on the active mode,
+ *   - adjusts the Jev decision pause via {"type":"set_jev_pause","seconds":N},
+ *     with the server snapshot's "jev_pause" key authoritative on the value.
  *
  * Protocol (see PLAN.md):
  *   client → server: {"type":"command","cmd":"move_left"|...,"ts":ms}
@@ -17,9 +19,10 @@
  *                    {"type":"ack","seq":N}      after each accepted snapshot
  *                    {"type":"resync"}           on seq gap / after reconnect
  *                    {"type":"set_mode","mode":"human"|"jev"}
+ *                    {"type":"set_jev_pause","seconds":N}   (clamped to [0,30])
  *   server → client: {"type":"snapshot","seq":N,"board":[20 rows],"hold":char|null,
  *                     "next":[5 chars],"score":N,"lines":N,"level":N,"combo":N,
- *                     "b2b":bool,"game_over":bool}
+ *                     "b2b":bool,"game_over":bool,"jev_pause":N}
  *                    {"type":"game_over"}, {"type":"ack"}, {"type":"resync"}
  *
  * The falling piece is NOT part of the snapshot contract. If the server
@@ -32,6 +35,13 @@
  * may add a "ghost" field ({type,x,y,rot} of the piece's target landing
  * placement, same coordinates as "piece" — the client draws it at ~35% alpha
  * beneath the falling piece) and the client suppresses all keyboard commands.
+ *
+ * The Jev decision pause ("jev_pause" — seconds the server waits between Jev
+ * decisions) is carried in every snapshot that includes it; a snapshot
+ * without the key leaves the current value unchanged. The client changes it
+ * with {"type":"set_jev_pause","seconds":N} (clamped to [0,30] on both sides)
+ * and, like the player mode, shows the requested value dimmed until a server
+ * snapshot confirms it.
  */
 
 (() => {
@@ -50,6 +60,10 @@
   const WS_PATH = "/ws";
   const RECONNECT_MIN_MS = 1000;
   const RECONNECT_MAX_MS = 2000;
+
+  const PAUSE_STEP = 0.5; // seconds per +/- click on the pause control
+  const PAUSE_MIN = 0;    // client-side clamp; the server clamps to [0, 30] too
+  const PAUSE_MAX = 30;
 
   const COLORS = {
     I: "#22d3ee",
@@ -118,6 +132,10 @@
     modeToggle: document.getElementById("mode-toggle"),
     modeBtnHuman: document.getElementById("mode-btn-human"),
     modeBtnJev: document.getElementById("mode-btn-jev"),
+    pauseControl: document.getElementById("pause-control"),
+    pauseValue: document.getElementById("pause-value"),
+    pauseDec: document.getElementById("pause-dec"),
+    pauseInc: document.getElementById("pause-inc"),
     overlayPause: document.getElementById("overlay-pause"),
     overlayOver: document.getElementById("overlay-over"),
     finalScore: document.getElementById("final-score"),
@@ -133,6 +151,7 @@
     piece: null,      // optional server-provided falling piece
     ghost: null,      // jev mode: target landing placement {type,x,y,rot} or null
     mode: "human",    // active player mode, authoritative from the server
+    jevPause: 1.0,    // seconds between Jev decisions, authoritative from snapshots
     hold: null,       // held piece char or null
     next: [],         // up to 5 piece chars
     score: 0,
@@ -150,6 +169,11 @@
   // null means there is no in-flight switch. The server snapshot is
   // authoritative: state.mode only changes when a snapshot's "mode" matches.
   let pendingMode = null;
+
+  // Pause seconds the +/- control has requested but no snapshot has confirmed
+  // yet. null means no change is in flight. The server snapshot is
+  // authoritative: state.jevPause only changes when a snapshot carries it.
+  let pendingPause = null;
 
   // Client-side DAS/ARR for left/right movement.
   const das = {
@@ -278,6 +302,53 @@
   el.modeBtnJev.addEventListener("click", () => requestMode("jev"));
 
   // ------------------------------------------------------------------
+  // Jev decision pause (seconds the server waits between Jev decisions)
+  // ------------------------------------------------------------------
+
+  /*
+   * Value currently shown: the pending request while one is in flight, else
+   * the authoritative snapshot value. Like the mode toggle, the pending value
+   * is shown dimmed until the server snapshot confirms it.
+   */
+  function displayedPause() {
+    return pendingPause !== null ? pendingPause : state.jevPause;
+  }
+
+  function clampPause(seconds) {
+    return Math.min(PAUSE_MAX, Math.max(PAUSE_MIN, seconds));
+  }
+
+  /*
+   * Reflects the pause state onto the control: value readout, pending dim and
+   * the +/- button bounds. In human mode the control is styled dimmer (it
+   * only affects Jev) but stays clickable so the value can be pre-set — the
+   * server stores it regardless of the active mode.
+   */
+  function updatePauseUI() {
+    const value = displayedPause();
+    el.pauseValue.textContent = value.toFixed(1) + "s";
+    el.pauseControl.classList.toggle("pending", pendingPause !== null);
+    el.pauseControl.classList.toggle("human-mode", state.mode !== "jev");
+    el.pauseDec.disabled = value <= PAUSE_MIN;
+    el.pauseInc.disabled = value >= PAUSE_MAX;
+  }
+
+  function requestPause(seconds) {
+    const target = clampPause(seconds);
+    if (target === displayedPause()) return; // already the active/requested value
+    pendingPause = target;
+    send({ type: "set_jev_pause", seconds: target });
+    updatePauseUI();
+  }
+
+  el.pauseDec.addEventListener("click", () => {
+    requestPause(displayedPause() - PAUSE_STEP);
+  });
+  el.pauseInc.addEventListener("click", () => {
+    requestPause(displayedPause() + PAUSE_STEP);
+  });
+
+  // ------------------------------------------------------------------
   // Message handling
   // ------------------------------------------------------------------
 
@@ -337,6 +408,14 @@
     }
     pendingMode = null; // snapshot reconciles any pending switch
     updateModeUI();
+
+    // Server is authoritative on the Jev decision pause; a missing
+    // "jev_pause" key keeps the current value (pre-pause servers omit it).
+    if (typeof snap.jev_pause === "number" && Number.isFinite(snap.jev_pause)) {
+      state.jevPause = snap.jev_pause;
+    }
+    pendingPause = null; // snapshot reconciles any pending pause change
+    updatePauseUI();
 
     if (snap.game_over === true) {
       onGameOver(snap);

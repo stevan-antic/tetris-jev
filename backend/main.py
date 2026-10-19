@@ -70,8 +70,11 @@ class Session:
         self.game_over_notified = False
         self.mode = mode
         self._brain = brain           # injectable stub for tests; default JevBrain
+        self.jev_pause: float = 1.0   # seconds to wait before each decision
         self._decision_task: asyncio.Task | None = None
         self._last_decision_serial: int | None = None
+        # Seconds Jev "thinks" before deciding on each piece (set_jev_pause).
+        self.jev_pause: float = 1.0
         self._ghost: dict | None = None
         self._ghost_serial: int | None = None
 
@@ -92,6 +95,9 @@ class Session:
             else None
         )
         state["mode"] = self.mode
+        # Top-level in every snapshot, in ALL modes, so the frontend control
+        # always shows the authoritative value.
+        state["jev_pause"] = self.jev_pause
         if self.mode == "jev":
             state["ghost"] = self._ghost
         return protocol.build_snapshot(self.seq.next(), state)
@@ -140,6 +146,18 @@ class Session:
                     # must stay loop-free (tests call it without a loop).
                 return [{"type": "ack"}]
             return []
+        if mtype == "set_jev_pause":
+            seconds = msg.get("seconds")
+            # bool is an int subclass but not a sensible value here — treat
+            # it as invalid, like any other non-numeric payload.
+            if isinstance(seconds, (int, float)) and not isinstance(seconds, bool):
+                # Clamp to [0, 30]: 0 disables the pause, 30 keeps a runaway
+                # value from making Jev appear frozen.
+                self.jev_pause = min(30.0, max(0.0, float(seconds)))
+                # A decision already in flight keeps the pause it read at
+                # task start; the new value applies from the next piece.
+                return [{"type": "ack"}]
+            return []  # non-numeric / missing -> ignored, no ack
         if mtype == "resync":
             # Client detected a gap / reconnected: ack plus a fresh full
             # snapshot with the next seq from the same counter.
@@ -194,6 +212,11 @@ class Session:
         The whole path is awaited (never on the tick thread); every identity
         check re-reads live game state, so a stale answer is dropped the
         moment the piece, mode, serial, or game-over state changes."""
+        # Jev "thinks" before the piece moves: no ghost, no commands during
+        # the pause. A cancel (mode switch / game over) interrupts the sleep
+        # (CancelledError), and gravity keeps ticking so the stale checks
+        # below still drop the decision if the piece locks mid-pause.
+        await asyncio.sleep(self.jev_pause)
         try:
             options = enumerate_placements(self.game)
             if not options:

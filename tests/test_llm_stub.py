@@ -100,6 +100,7 @@ class FirstCallDelayedBrain:
 async def drive_one_piece(seed: int, brain):
     """Session in jev mode: tick, let the decision land, apply it."""
     s = Session(game=Game(seed=seed), mode="jev", brain=brain)
+    s.jev_pause = 0.0  # keep the suite fast; the pause itself is tested in test_jev_pause.py
     s.tick()
     task = s._decision_task
     assert task is not None, "no decision task started"
@@ -314,6 +315,7 @@ class TestSessionMode:
             seed = seed_for("T")
             brain = StubBrain(heuristic_policy)
             s = Session(game=Game(seed=seed), mode="jev", brain=brain)
+            s.jev_pause = 0.0
             s.tick()
             await s._decision_task  # decision lands, ghost is set
             options = brain.calls[0][1]
@@ -335,6 +337,7 @@ class TestSessionMode:
         async def go():
             seed = seed_for("T")
             s = Session(game=Game(seed=seed), mode="jev", brain=StubBrain(heuristic_policy))
+            s.jev_pause = 0.0
             s.tick()
             await s._decision_task
             s.tick()  # piece locks, next spawns
@@ -371,6 +374,7 @@ class TestSessionMode:
         async def go():
             seed = seed_for("T")
             s = Session(game=Game(seed=seed), mode="jev", brain=FirstCallDelayedBrain(0.05, heuristic_policy))
+            s.jev_pause = 0.0
             s.tick()
             task = s._decision_task
             assert task is not None
@@ -410,6 +414,7 @@ class TestSessionMode:
 
             seed = seed_for("T")
             s = Session(game=Game(seed=seed), mode="jev", brain=ExplodingBrain())
+            s.jev_pause = 0.0
             s.tick()
             await s._decision_task
             # The heuristic still placed the piece.
@@ -474,6 +479,7 @@ class TestHeadlessSmoke:
 
         async def go():
             s = Session(game=Game(seed=11), mode="jev", brain=StubBrain(heuristic_policy))
+            s.jev_pause = 0.0
             target_pieces = 20
             ticks = 0
             while not s.game.game_over and s.game.piece_serial <= target_pieces + 1 and ticks < 5000:
@@ -494,6 +500,7 @@ class TestHeadlessSmoke:
     def test_jev_session_clears_lines_with_heuristic_brain(self):
         async def go():
             s = Session(game=Game(seed=11), mode="jev", brain=StubBrain(heuristic_policy))
+            s.jev_pause = 0.0
             for _ in range(400):
                 if s.game.game_over:
                     break
