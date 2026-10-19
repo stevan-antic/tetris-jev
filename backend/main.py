@@ -142,14 +142,24 @@ async def _ticker(session: Session, out: "asyncio.Queue") -> None:
     if it occasionally slips."""
     loop = asyncio.get_running_loop()
     next_t = loop.time()
+    n = 0
     while True:
-        for msg in session.tick():
+        n += 1
+        try:
+            msgs = session.tick()
+        except Exception as e:  # TEMP DEBUG
+            print(f"TICK ERROR #{n}: {e!r}", flush=True)
+            raise
+        for msg in msgs:
+            print(f"TICK: put {msg.get('type')} seq={msg.get('seq')}", flush=True)
             out.put_nowait(msg)
         if session.game_over_notified:
+            print("TICK: game over notified, stopping", flush=True)
             return  # sim stops; receiver/sender keep the socket alive
         next_t += TICK_MS
         delay = next_t - loop.time()
         await asyncio.sleep(delay if delay > 0 else 0.0)
+        print(f"TICK: woke up iteration {n}", flush=True)  # TEMP DEBUG
 
 
 async def _receiver(ws: WebSocket, session: Session, out: "asyncio.Queue") -> None:
@@ -162,6 +172,7 @@ async def _receiver(ws: WebSocket, session: Session, out: "asyncio.Queue") -> No
 async def _sender(ws: WebSocket, out: "asyncio.Queue") -> None:
     while True:
         msg = await out.get()
+        print(f"SEND: {msg.get('type')} seq={msg.get('seq')}", flush=True)
         await ws.send_text(protocol.encode_message(msg))
 
 
