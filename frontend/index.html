@@ -9,10 +9,19 @@
 <body>
   <div class="app">
     <header class="topbar">
-      <h1 class="title">TETRIS</h1>
-      <div id="conn" class="conn disconnected">
-        <span class="dot"></span>
-        <span id="conn-text">Disconnected</span>
+      <div class="topbar-left">
+        <div id="mode-toggle" class="mode-toggle" role="group" aria-label="Player mode">
+          <button id="mode-btn-human" class="mode-btn active" type="button">Human</button>
+          <button id="mode-btn-jev" class="mode-btn" type="button">Jev</button>
+        </div>
+        <h1 class="title">TETRIS</h1>
+      </div>
+      <div class="topbar-right">
+        <div id="mode-badge" class="mode-badge human">Human</div>
+        <div id="conn" class="conn disconnected">
+          <span class="dot"></span>
+          <span id="conn-text">Disconnected</span>
+        </div>
       </div>
     </header>
 

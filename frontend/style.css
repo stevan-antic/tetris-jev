@@ -11,6 +11,7 @@
   --green: #22c55e;
   --amber: #f59e0b;
   --red: #ef4444;
+  --violet: #a855f7;
 }
 
 * {
@@ -105,6 +106,88 @@ body {
 
 .conn.disconnected .dot {
   background: var(--red);
+}
+
+/* ---------- player mode toggle + badge ---------- */
+
+.topbar-left {
+  display: flex;
+  align-items: center;
+  gap: 18px;
+}
+
+.topbar-right {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.mode-toggle {
+  display: flex;
+  border: 1px solid var(--panel-border);
+  border-radius: 999px;
+  background: var(--panel);
+  overflow: hidden;
+}
+
+.mode-btn {
+  font-family: inherit;
+  font-size: 11px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--muted);
+  background: transparent;
+  border: none;
+  padding: 5px 14px;
+  cursor: pointer;
+  transition: color 0.15s ease, background 0.15s ease;
+}
+
+.mode-btn:hover {
+  color: var(--text);
+}
+
+.mode-btn.active {
+  color: #0b0e14;
+  font-weight: 700;
+}
+
+.mode-btn#mode-btn-human.active {
+  background: var(--accent);
+}
+
+.mode-btn#mode-btn-jev.active {
+  background: var(--violet);
+}
+
+/* Awaiting server confirmation of a mode switch */
+.mode-toggle.pending .mode-btn {
+  opacity: 0.55;
+}
+
+.mode-badge {
+  font-size: 11px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  padding: 5px 12px;
+  border: 1px solid var(--panel-border);
+  border-radius: 999px;
+  background: var(--panel);
+  color: var(--muted);
+}
+
+.mode-badge.human {
+  color: var(--accent);
+  border-color: rgba(34, 211, 238, 0.35);
+}
+
+.mode-badge.jev {
+  color: var(--violet);
+  border-color: rgba(168, 85, 247, 0.4);
+}
+
+.mode-badge.pending {
+  opacity: 0.55;
 }
 
 .conn.disconnected {

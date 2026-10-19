@@ -18,6 +18,15 @@ Design:
     (serialize + send). On disconnect or any error all tasks are cancelled
     and the session is dropped — a reconnect is a brand-new game.
 
+LLM ("Jev") mode: the session has mode "human" | "jev" (set via the
+{"type":"set_mode"} client message, acked). In jev mode each newly spawned
+piece starts ONE async decision task: enumerate placements -> ask the brain
+(real Jev API by default; injectable stub for tests) -> translate the chosen
+option into the same command vocabulary a human uses -> submit. The task
+never blocks the 60Hz ticker (all I/O is awaited off the tick path); if the
+piece locks (or the mode flips) before the answer lands, the result is
+discarded and the next piece decides fresh.
+
 Wire contract (ground truth: frontend/game.js): client commands carry
 {"type":"command","cmd":...,"ts":...} with soft drop using phase:"down"/"up";
 protocol.py's canonical {"type":"command","command":...,"release":true}
@@ -27,12 +36,13 @@ shape is tolerated as well. Malformed/unknown input is ignored silently.
 import asyncio
 from pathlib import Path
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.staticfiles import StaticFiles
 
 from . import protocol
 from .engine.board import HIDDEN_ROWS
 from .engine.game import Game
+from .players.llm import build_state, enumerate_placements, pick_best_option, translate
 
 TICK_MS = 1000 / 60  # fixed 60Hz simulation step, in MILLISECONDS (engine dt)
 TICK_S = TICK_MS / 1000  # the same interval in SECONDS for asyncio.sleep
@@ -54,10 +64,16 @@ class Session:
     Deliberately socket-free: tests drive it with plain dicts/strings.
     """
 
-    def __init__(self, game: Game | None = None) -> None:
+    def __init__(self, game: Game | None = None, mode: str = "human", brain=None) -> None:
         self.game = game if game is not None else create_game()
         self.seq = protocol.SeqCounter()
         self.game_over_notified = False
+        self.mode = mode
+        self._brain = brain           # injectable stub for tests; default JevBrain
+        self._decision_task: asyncio.Task | None = None
+        self._last_decision_serial: int | None = None
+        self._ghost: dict | None = None
+        self._ghost_serial: int | None = None
 
     def build_snapshot(self) -> dict:
         """Full snapshot from the engine state, seq from the shared counter."""
@@ -75,6 +91,9 @@ class Session:
             if piece is not None
             else None
         )
+        state["mode"] = self.mode
+        if self.mode == "jev":
+            state["ghost"] = self._ghost
         return protocol.build_snapshot(self.seq.next(), state)
 
     def handle_client_message(self, msg: dict) -> list[dict]:
@@ -96,12 +115,31 @@ class Session:
             ):
                 name = "soft_drop_release"
             try:
+                # Jev owns the piece in jev mode; human keyboard input is
+                # tolerated but ignored so both don't steer one piece.
+                if self.mode == "jev":
+                    return []
                 self.game.submit(name)  # buffered; applied on the next tick
             except ValueError:
                 return []  # not in the engine vocabulary — ignored
             return []
         if mtype == "ack":
             return [{"type": "ack"}]
+        if mtype == "set_mode":
+            mode = msg.get("mode")
+            if mode in ("human", "jev"):
+                if mode != self.mode:
+                    self.mode = mode
+                    self._cancel_decision()
+                    self._ghost = None
+                    # Forget which piece already had its decision, so a
+                    # re-entry into jev mode starts fresh for the active piece.
+                    self._last_decision_serial = None
+                    # The tick loop starts the decision for the (possibly
+                    # already active) piece on its next step — this handler
+                    # must stay loop-free (tests call it without a loop).
+                return [{"type": "ack"}]
+            return []
         if mtype == "resync":
             # Client detected a gap / reconnected: ack plus a fresh full
             # snapshot with the next seq from the same counter.
@@ -123,6 +161,81 @@ class Session:
         )
         return [over, self.build_snapshot()]  # final snapshot, fresh seq
 
+    def _cancel_decision(self) -> None:
+        """Stop any in-flight decision task (mode switch / game end)."""
+        if self._decision_task is not None and not self._decision_task.done():
+            self._decision_task.cancel()
+        self._decision_task = None
+
+    def _get_brain(self):
+        if self._brain is None:
+            from .players.jev_api import JevBrain
+
+            self._brain = JevBrain()
+        return self._brain
+
+    def _maybe_decide(self) -> None:
+        """Start one decision task per newly spawned piece in jev mode.
+
+        Keyed on piece_serial, so a piece that already has (or had) a
+        decision never gets a second one — this covers ARE/hold-swaps (no
+        serial bump) and the post-lock spawn (serial bump)."""
+        if self.mode != "jev" or self.game.game_over:
+            return
+        if self.game.cur is None or self.game.piece_serial == self._last_decision_serial:
+            return
+        self._last_decision_serial = self.game.piece_serial
+        self._ghost = None  # clear the previous piece's ghost (stale now)
+        self._decision_task = asyncio.create_task(self._decide(self.game.piece_serial))
+
+    async def _decide(self, piece_serial: int) -> None:
+        """Enumerate -> brain -> translate -> submit, for one piece.
+
+        The whole path is awaited (never on the tick thread); every identity
+        check re-reads live game state, so a stale answer is dropped the
+        moment the piece, mode, serial, or game-over state changes."""
+        try:
+            options = enumerate_placements(self.game)
+            if not options:
+                return
+            by_id = {o.id: o for o in options}
+            state = build_state(self.game)
+            try:
+                choice_id, _probs = await self._get_brain().choose(state, options)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                choice_id = None  # brain failure -> heuristic, never a stall
+            option = by_id.get(choice_id) if choice_id else None
+            if option is None:  # timeout / error / unknown id -> heuristic
+                option = pick_best_option(options)
+            if option is None:
+                return
+            # Stale checks AFTER the await: the piece may have locked (cur
+            # is None during ARE — commands must never queue onto the next
+            # piece), the mode may have flipped, or a decision started for a
+            # previous piece may have landed late (serial mismatch). For a
+            # non-hold option the active piece must still be the enumerated
+            # piece; for a hold option the active piece is the ORIGINAL
+            # piece until the hold lands, so only the serial is checked.
+            if (
+                self.mode != "jev"
+                or self.game.game_over
+                or self.game.cur is None
+                or self.game.piece_serial != piece_serial
+            ):
+                return
+            if not option.hold and self.game.cur != option.piece:
+                return
+            for cmd in translate(option):
+                self.game.submit(cmd)
+            self._ghost = {"type": option.piece, "x": option.x, "y": option.y - HIDDEN_ROWS, "rot": option.rot}
+            self._ghost_serial = piece_serial
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            pass  # a broken brain must never take down the session
+
     def tick(self) -> list[dict]:
         """One fixed sim step + snapshot; after game over, nothing."""
         if self.game.game_over:
@@ -131,6 +244,9 @@ class Session:
             self.game_over_notified = True
             return self._game_over_messages()
         self.game.step(TICK_MS)
+        # Spawned pieces in jev mode start their decision task here (off the
+        # sim's critical path: the task only enumerates, then awaits I/O).
+        self._maybe_decide()
         if self.game.game_over:  # top-out caused by this very tick
             self.game_over_notified = True
             return self._game_over_messages()
@@ -195,6 +311,18 @@ async def ws_endpoint(ws: WebSocket) -> None:
             # The child tasks are already cancelled and will finish on their
             # own, so the reap being interrupted is harmless.
             pass
+
+
+# Static assets must never be heuristically cached: without a Cache-Control
+# header browsers may serve a stale game.js for hours (new index.html renders
+# buttons the old JS knows nothing about). "no-cache" forces revalidation
+# against the ETag — still efficient (304s) but never stale. The /ws scope
+# passes through untouched.
+@app.middleware("http")
+async def no_cache_static(request: Request, call_next):
+    response = await call_next(request)
+    response.headers["Cache-Control"] = "no-cache"
+    return response
 
 
 # Mounted after the /ws route so the socket endpoint wins routing.

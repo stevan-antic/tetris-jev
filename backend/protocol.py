@@ -10,6 +10,7 @@ Message vocabulary (the ``type`` field):
 - ``ack``            client -> server: acknowledges latest snapshot seq
 - ``resync``         client -> server: seq gap detected, requests full snapshot
 - ``command``        client -> server: a player command (optionally timestamped)
+- ``set_mode``       client -> server: switch player mode ("human" | "jev")
 - ``option_request`` server -> client: LLM-mode placement options
 - ``option_choice``  client -> server: LLM-mode chosen option index
 """
@@ -33,7 +34,7 @@ COMMANDS = (
 
 # All message types on the wire.
 MESSAGE_TYPES = frozenset(
-    ("snapshot", "game_over", "ack", "resync", "command", "option_request", "option_choice")
+    ("snapshot", "game_over", "ack", "resync", "command", "set_mode", "option_request", "option_choice")
 )
 
 # Board serialization alphabet: '.' empty, otherwise a locked piece id.

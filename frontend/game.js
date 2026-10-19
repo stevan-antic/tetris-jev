@@ -1,19 +1,22 @@
 "use strict";
 
 /*
- * Tetris web client — phase 1 (human mode).
+ * Tetris web client — human mode plus the Jev (LLM) player-mode toggle.
  *
  * All game logic lives on the server. This client:
  *   - connects over WebSocket and renders server-authoritative snapshots,
  *   - translates keyboard input into commands (with client-side DAS/ARR),
  *   - acks every snapshot, detects seq gaps and sends resync,
- *   - reconnects with 1–2s backoff and resyncs on reconnect.
+ *   - reconnects with 1–2s backoff and resyncs on reconnect,
+ *   - switches between "human" and "jev" player modes via {"type":"set_mode"},
+ *     with the server snapshot's "mode" key authoritative on the active mode.
  *
  * Protocol (see PLAN.md):
  *   client → server: {"type":"command","cmd":"move_left"|...,"ts":ms}
  *                    (soft drop uses {"type":"command","cmd":"soft_drop","phase":"down"|"up","ts":ms})
  *                    {"type":"ack","seq":N}      after each accepted snapshot
  *                    {"type":"resync"}           on seq gap / after reconnect
+ *                    {"type":"set_mode","mode":"human"|"jev"}
  *   server → client: {"type":"snapshot","seq":N,"board":[20 rows],"hold":char|null,
  *                     "next":[5 chars],"score":N,"lines":N,"level":N,"combo":N,
  *                     "b2b":bool,"game_over":bool}
@@ -23,6 +26,12 @@
  * includes an optional "piece" field ({type,x,y,rot} — x/y top-left of the
  * piece's bounding box), it is rendered on top of the locked cells; if the
  * field is absent (or unparseable) the client renders locked cells only.
+ *
+ * Player mode is likewise optional on the wire for backwards compatibility:
+ * a snapshot without "mode" is treated as "human". In "jev" mode the server
+ * may add a "ghost" field ({type,x,y,rot} of the piece's target landing
+ * placement, same coordinates as "piece" — the client draws it at ~35% alpha
+ * beneath the falling piece) and the client suppresses all keyboard commands.
  */
 
 (() => {
@@ -105,6 +114,10 @@
     b2b: document.getElementById("b2b"),
     conn: document.getElementById("conn"),
     connText: document.getElementById("conn-text"),
+    modeBadge: document.getElementById("mode-badge"),
+    modeToggle: document.getElementById("mode-toggle"),
+    modeBtnHuman: document.getElementById("mode-btn-human"),
+    modeBtnJev: document.getElementById("mode-btn-jev"),
     overlayPause: document.getElementById("overlay-pause"),
     overlayOver: document.getElementById("overlay-over"),
     finalScore: document.getElementById("final-score"),
@@ -118,6 +131,8 @@
   const state = {
     board: null,      // 20 strings of '.'/'IJLOSTZ' (locked cells, row 0 = top)
     piece: null,      // optional server-provided falling piece
+    ghost: null,      // jev mode: target landing placement {type,x,y,rot} or null
+    mode: "human",    // active player mode, authoritative from the server
     hold: null,       // held piece char or null
     next: [],         // up to 5 piece chars
     score: 0,
@@ -131,6 +146,10 @@
 
   let paused = false;
   let pausedAt = 0;
+  // Mode the toggle has requested but the server has not confirmed yet.
+  // null means there is no in-flight switch. The server snapshot is
+  // authoritative: state.mode only changes when a snapshot's "mode" matches.
+  let pendingMode = null;
 
   // Client-side DAS/ARR for left/right movement.
   const das = {
@@ -223,6 +242,42 @@
   }
 
   // ------------------------------------------------------------------
+  // Player mode (human / jev)
+  // ------------------------------------------------------------------
+
+  /*
+   * Reflects the mode state onto the toggle buttons and the badge. While a
+   * switch is pending (requested but not yet confirmed by a snapshot) the
+   * requested mode is shown dimmed; the server snapshot is authoritative.
+   */
+  function updateModeUI() {
+    const active = pendingMode !== null ? pendingMode : state.mode;
+    const isPending = pendingMode !== null;
+    const isJev = active === "jev";
+
+    el.modeBadge.textContent = isJev ? "Jev" : "Human";
+    el.modeBadge.classList.toggle("jev", isJev);
+    el.modeBadge.classList.toggle("human", !isJev);
+    el.modeBadge.classList.toggle("pending", isPending);
+
+    el.modeBtnHuman.classList.toggle("active", !isJev);
+    el.modeBtnJev.classList.toggle("active", isJev);
+    el.modeToggle.classList.toggle("pending", isPending);
+  }
+
+  function requestMode(mode) {
+    if (mode !== "human" && mode !== "jev") return;
+    if (mode === state.mode && pendingMode === null) return; // already active
+    if (mode === pendingMode) return; // already requesting this switch
+    pendingMode = mode;
+    send({ type: "set_mode", mode });
+    updateModeUI();
+  }
+
+  el.modeBtnHuman.addEventListener("click", () => requestMode("human"));
+  el.modeBtnJev.addEventListener("click", () => requestMode("jev"));
+
+  // ------------------------------------------------------------------
   // Message handling
   // ------------------------------------------------------------------
 
@@ -262,6 +317,7 @@
 
     state.board = Array.isArray(snap.board) ? snap.board : null;
     state.piece = snap.piece !== undefined ? snap.piece : null;
+    state.ghost = snap.ghost !== undefined ? snap.ghost : null;
     state.hold = typeof snap.hold === "string" ? snap.hold : null;
     state.next = Array.isArray(snap.next) ? snap.next : [];
     state.score = typeof snap.score === "number" ? snap.score : state.score;
@@ -270,6 +326,17 @@
     state.combo = typeof snap.combo === "number" ? snap.combo : 0;
     state.b2b = snap.b2b === true;
     state.dirty = true;
+
+    // Server is authoritative on the active player mode; a missing "mode"
+    // key is treated as "human" (pre-Jev servers simply omit it).
+    const snapMode = typeof snap.mode === "string" &&
+      (snap.mode === "human" || snap.mode === "jev") ? snap.mode : "human";
+    if (state.mode !== snapMode) {
+      state.mode = snapMode;
+      if (snapMode === "jev") clearHeldState(); // keep no keys stuck in jev mode
+    }
+    pendingMode = null; // snapshot reconciles any pending switch
+    updateModeUI();
 
     if (snap.game_over === true) {
       onGameOver(snap);
@@ -339,7 +406,10 @@
   function clearHeldState() {
     if (softHeld) {
       softHeld = false;
-      sendCommand("soft_drop", { phase: "up" });
+      // Never send keyboard commands in jev mode; just drop the local state.
+      if (state.mode !== "jev") {
+        sendCommand("soft_drop", { phase: "up" });
+      }
     }
     das.dir = null;
     das.charged = false;
@@ -361,6 +431,9 @@
       return;
     }
     if (paused || state.over) return; // pause freezes all input except P/R
+    // Jev mode: the LLM plays — the client must not send keyboard commands.
+    // P/R above stay local (pause overlay / reload).
+    if (state.mode === "jev") return;
 
     switch (e.code) {
       case "ArrowLeft":
@@ -430,7 +503,7 @@
 
   // Per-frame DAS/ARR: one move command per ARR tick while charged.
   function updateDas(t) {
-    if (paused || state.over || !das.dir) return;
+    if (paused || state.over || state.mode === "jev" || !das.dir) return;
     if (!das.charged) {
       if (t - das.start < DAS_MS) return;
       das.charged = true;
@@ -490,6 +563,24 @@
           drawCell(bctx, c, r, COLORS[ch] || "#94a3b8");
         }
       }
+    }
+
+    // Optional ghost piece — jev mode target landing placement, drawn at
+    // ~35% alpha so it stays clearly distinguishable from the falling piece
+    // (which is drawn on top of it below). y may be negative while the
+    // target sits in hidden rows; off-board cells are simply skipped.
+    const ghost = parsePiece(state.ghost);
+    if (ghost) {
+      const cells = ROTATIONS[ghost.type][ghost.rot];
+      bctx.globalAlpha = 0.35;
+      for (const [r, c] of cells) {
+        const x = ghost.x + c;
+        const y = ghost.y + r;
+        if (x >= 0 && x < COLS && y >= 0 && y < ROWS) {
+          drawCell(bctx, x, y, COLORS[ghost.type] || "#94a3b8");
+        }
+      }
+      bctx.globalAlpha = 1;
     }
 
     // Optional falling piece — only if the server includes it.

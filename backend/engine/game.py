@@ -77,6 +77,7 @@ class Game:
         self.last_action_rotation = False  # last successful positional action was a rotation
         self.last_kick_index: int | None = None
         self.last_event: str | None = None
+        self.piece_serial = 0    # incremented on every spawn; LLM decisions key on this
         self._queue: list[str] = []
         self._spawn_next()
 
@@ -212,6 +213,7 @@ class Game:
 
     def _spawn(self, piece_id: str) -> None:
         """Fresh spawn: origin (3, 0), all timers reset. Block-out = game over."""
+        self.piece_serial += 1
         self.cur = piece_id
         self.px = SPAWN_X
         self.py = SPAWN_Y
