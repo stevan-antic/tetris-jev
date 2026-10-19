@@ -1,0 +1,90 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Tetris — Jev</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div class="app">
+    <header class="topbar">
+      <h1 class="title">TETRIS</h1>
+      <div id="conn" class="conn disconnected">
+        <span class="dot"></span>
+        <span id="conn-text">Disconnected</span>
+      </div>
+    </header>
+
+    <main class="layout">
+      <!-- Left side: hold + stats -->
+      <aside class="side">
+        <section class="panel">
+          <h2 class="panel-title">Hold</h2>
+          <canvas id="hold" width="148" height="76"></canvas>
+        </section>
+
+        <section class="panel">
+          <h2 class="panel-title">Stats</h2>
+          <div class="stats">
+            <div class="stat"><span class="stat-label">Score</span><span id="score" class="stat-value">0</span></div>
+            <div class="stat"><span class="stat-label">Lines</span><span id="lines" class="stat-value">0</span></div>
+            <div class="stat"><span class="stat-label">Level</span><span id="level" class="stat-value">1</span></div>
+            <div class="stat"><span class="stat-label">Combo</span><span id="combo" class="stat-value">0</span></div>
+            <div class="stat">
+              <span class="stat-label">Back-to-Back</span>
+              <span id="b2b" class="stat-value b2b-off">OFF</span>
+            </div>
+          </div>
+        </section>
+      </aside>
+
+      <!-- Center: playfield -->
+      <div class="playfield-wrap">
+        <canvas id="board" width="320" height="640"></canvas>
+
+        <div id="overlay-pause" class="overlay hidden">
+          <div class="overlay-card">
+            <div class="overlay-title">PAUSED</div>
+            <div class="overlay-hint">Press P to resume</div>
+          </div>
+        </div>
+
+        <div id="overlay-over" class="overlay hidden">
+          <div class="overlay-card">
+            <div class="overlay-title">GAME OVER</div>
+            <div class="overlay-final">
+              <div class="overlay-final-row">Score <span id="final-score">0</span></div>
+              <div class="overlay-final-row">Lines <span id="final-lines">0</span></div>
+            </div>
+            <div class="overlay-hint">Press R to restart</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Right side: next queue + controls -->
+      <aside class="side">
+        <section class="panel">
+          <h2 class="panel-title">Next</h2>
+          <canvas id="next" width="148" height="370"></canvas>
+        </section>
+
+        <section class="panel">
+          <h2 class="panel-title">Controls</h2>
+          <div class="keys">
+            <div class="key-row"><span class="key">←</span><span class="key">→</span><span>Move</span></div>
+            <div class="key-row"><span class="key">↓</span><span>Soft drop (hold)</span></div>
+            <div class="key-row"><span class="key">Space</span><span>Hard drop</span></div>
+            <div class="key-row"><span class="key">↑</span><span class="key">X</span><span>Rotate CW</span></div>
+            <div class="key-row"><span class="key">Z</span><span>Rotate CCW</span></div>
+            <div class="key-row"><span class="key">C</span><span class="key">Shift</span><span>Hold piece</span></div>
+            <div class="key-row"><span class="key">P</span><span>Pause</span></div>
+          </div>
+        </section>
+      </aside>
+    </main>
+  </div>
+
+  <script src="game.js"></script>
+</body>
+</html>
