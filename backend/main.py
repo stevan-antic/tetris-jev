@@ -34,7 +34,8 @@ from . import protocol
 from .engine.board import HIDDEN_ROWS
 from .engine.game import Game
 
-TICK_MS = 1000 / 60  # fixed 60Hz simulation step (one snapshot per tick)
+TICK_MS = 1000 / 60  # fixed 60Hz simulation step, in MILLISECONDS (engine dt)
+TICK_S = TICK_MS / 1000  # the same interval in SECONDS for asyncio.sleep
 
 FRONTEND_DIR = Path(__file__).resolve().parent.parent / "frontend"
 
@@ -142,24 +143,14 @@ async def _ticker(session: Session, out: "asyncio.Queue") -> None:
     if it occasionally slips."""
     loop = asyncio.get_running_loop()
     next_t = loop.time()
-    n = 0
     while True:
-        n += 1
-        try:
-            msgs = session.tick()
-        except Exception as e:  # TEMP DEBUG
-            print(f"TICK ERROR #{n}: {e!r}", flush=True)
-            raise
-        for msg in msgs:
-            print(f"TICK: put {msg.get('type')} seq={msg.get('seq')}", flush=True)
+        for msg in session.tick():
             out.put_nowait(msg)
         if session.game_over_notified:
-            print("TICK: game over notified, stopping", flush=True)
             return  # sim stops; receiver/sender keep the socket alive
-        next_t += TICK_MS
+        next_t += TICK_S
         delay = next_t - loop.time()
         await asyncio.sleep(delay if delay > 0 else 0.0)
-        print(f"TICK: woke up iteration {n}", flush=True)  # TEMP DEBUG
 
 
 async def _receiver(ws: WebSocket, session: Session, out: "asyncio.Queue") -> None:
@@ -172,7 +163,6 @@ async def _receiver(ws: WebSocket, session: Session, out: "asyncio.Queue") -> No
 async def _sender(ws: WebSocket, out: "asyncio.Queue") -> None:
     while True:
         msg = await out.get()
-        print(f"SEND: {msg.get('type')} seq={msg.get('seq')}", flush=True)
         await ws.send_text(protocol.encode_message(msg))
 
 
