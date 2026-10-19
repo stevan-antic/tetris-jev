@@ -4,17 +4,20 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Tetris — Jev</title>
-  <link rel="stylesheet" href="style.css">
+  <link rel="stylesheet" href="style.css?v=2">
 </head>
 <body>
   <div class="app">
     <header class="topbar">
       <div class="topbar-left">
-        <div id="mode-toggle" class="mode-toggle" role="group" aria-label="Player mode">
-          <button id="mode-btn-human" class="mode-btn active" type="button">Human</button>
-          <button id="mode-btn-jev" class="mode-btn" type="button">Jev</button>
+        <div class="title-block">
+          <h1 class="title">TETRIS</h1>
+          <div id="mode-toggle" class="mode-toggle" role="group" aria-label="Player mode">
+            <span class="player-label">PLAYER:</span>
+            <button id="mode-btn-human" class="mode-btn active" type="button"><span class="bullet"></span>Human</button>
+            <button id="mode-btn-jev" class="mode-btn" type="button"><span class="bullet"></span>Jev</button>
+          </div>
         </div>
-        <h1 class="title">TETRIS</h1>
       </div>
       <div class="topbar-right">
         <div id="mode-badge" class="mode-badge human">Human</div>
@@ -94,6 +97,6 @@
     </main>
   </div>
 
-  <script src="game.js"></script>
+  <script src="game.js?v=2"></script>
 </body>
 </html>
