@@ -11,7 +11,12 @@
  *   - switches between "human" and "jev" player modes via {"type":"set_mode"},
  *     with the server snapshot's "mode" key authoritative on the active mode,
  *   - adjusts the Jev decision pause via {"type":"set_jev_pause","seconds":N},
- *     with the server snapshot's "jev_pause" key authoritative on the value.
+ *     with the server snapshot's "jev_pause" key authoritative on the value,
+ *   - picks the LLM brain profile via {"type":"set_brain","profile":"<id>"},
+ *     with the server snapshot's "brain"/"profiles" keys authoritative on the
+ *     active profile and the selectable list,
+ *   - sets the start level via {"type":"set_level","level":N} (1..10), which
+ *     makes the server restart the game at that level.
  *
  * Protocol (see PLAN.md):
  *   client → server: {"type":"command","cmd":"move_left"|...,"ts":ms}
@@ -20,9 +25,12 @@
  *                    {"type":"resync"}           on seq gap / after reconnect
  *                    {"type":"set_mode","mode":"human"|"jev"}
  *                    {"type":"set_jev_pause","seconds":N}   (clamped to [0,30])
+ *                    {"type":"set_brain","profile":"<id>"}
+ *                    {"type":"set_level","level":N}   (start level 1..10; server resets the game)
  *   server → client: {"type":"snapshot","seq":N,"board":[20 rows],"hold":char|null,
  *                     "next":[5 chars],"score":N,"lines":N,"level":N,"combo":N,
- *                     "b2b":bool,"game_over":bool,"jev_pause":N}
+ *                     "b2b":bool,"game_over":bool,"jev_pause":N,
+ *                     "brain":"<id>","profiles":[{id,available},...]}
  *                    {"type":"game_over"}, {"type":"ack"}, {"type":"resync"}
  *
  * The falling piece is NOT part of the snapshot contract. If the server
@@ -42,6 +50,20 @@
  * with {"type":"set_jev_pause","seconds":N} (clamped to [0,30] on both sides)
  * and, like the player mode, shows the requested value dimmed until a server
  * snapshot confirms it.
+ *
+ * The brain profile ("brain" — the LLM backend the Jev player uses) and the
+ * selectable profile list ("profiles" — [{id,available},...] straight from the
+ * server, so env.yaml changes flow through) work the same way: the client
+ * picks a profile with {"type":"set_brain","profile":"<id>"}. Unavailable or
+ * unknown profiles get no ack from the server; the request shows dimmed and
+ * the next snapshot clears the pending state, reverting the dropdown to the
+ * snapshot's "brain". Unavailable profiles render as disabled options.
+ *
+ * The start level ("level" in the snapshot) is set with
+ * {"type":"set_level","level":N} (clamped to 1..10 client-side; the server
+ * clamps too): the server RESETS the game with that start level, so the next
+ * snapshot carries the fresh board with level=N. The request shows dimmed
+ * until that snapshot arrives, same reconciliation as the pause control.
  */
 
 (() => {
@@ -64,6 +86,9 @@
   const PAUSE_STEP = 0.5; // seconds per +/- click on the pause control
   const PAUSE_MIN = 0;    // client-side clamp; the server clamps to [0, 30] too
   const PAUSE_MAX = 30;
+
+  const LEVEL_MIN = 1;    // start-level stepper bounds (client-side clamp;
+  const LEVEL_MAX = 10;   // the server clamps to [1, 10] too)
 
   const COLORS = {
     I: "#22d3ee",
@@ -136,6 +161,12 @@
     pauseValue: document.getElementById("pause-value"),
     pauseDec: document.getElementById("pause-dec"),
     pauseInc: document.getElementById("pause-inc"),
+    brainControl: document.getElementById("brain-control"),
+    brainSelect: document.getElementById("brain-select"),
+    levelControl: document.getElementById("level-control"),
+    levelValue: document.getElementById("level-value"),
+    levelDec: document.getElementById("level-dec"),
+    levelInc: document.getElementById("level-inc"),
     overlayPause: document.getElementById("overlay-pause"),
     overlayOver: document.getElementById("overlay-over"),
     finalScore: document.getElementById("final-score"),
@@ -152,6 +183,8 @@
     ghost: null,      // jev mode: target landing placement {type,x,y,rot} or null
     mode: "human",    // active player mode, authoritative from the server
     jevPause: 1.0,    // seconds between Jev decisions, authoritative from snapshots
+    brain: null,      // active brain profile id, authoritative from snapshots
+    profiles: [],     // selectable profiles [{id, available}], server list
     hold: null,       // held piece char or null
     next: [],         // up to 5 piece chars
     score: 0,
@@ -174,6 +207,24 @@
   // yet. null means no change is in flight. The server snapshot is
   // authoritative: state.jevPause only changes when a snapshot carries it.
   let pendingPause = null;
+
+  // Brain profile the dropdown has requested but no snapshot has confirmed
+  // yet. null means no switch is in flight. The server snapshot is
+  // authoritative: state.brain only changes when a snapshot carries "brain".
+  // Unavailable/unknown profiles get NO ack, so the next snapshot clears the
+  // pending state and the dropdown reverts to the snapshot's "brain" — the
+  // same reconciliation as the player-mode toggle.
+  let pendingBrain = null;
+
+  // Signature of the profiles list the dropdown options were built from, so
+  // the option list is only rebuilt when the server's list actually changes.
+  let brainOptionsSig = "";
+
+  // Start level the +/- stepper has requested but no snapshot has confirmed
+  // yet. null means no reset is in flight. set_level makes the server restart
+  // the game at that level; the next snapshot carries the fresh board with
+  // level=N, which is the reconciliation.
+  let pendingLevel = null;
 
   // Client-side DAS/ARR for left/right movement.
   const das = {
@@ -349,6 +400,101 @@
   });
 
   // ------------------------------------------------------------------
+  // Brain profile (the LLM backend the Jev player uses)
+  // ------------------------------------------------------------------
+
+  /*
+   * Rebuilds the dropdown options from the server's "profiles" list whenever
+   * that list changes — there is no hardcoded profile list, so env.yaml
+   * changes flow through. Unavailable profiles render as disabled options
+   * ("<id> (unavailable)").
+   */
+  function rebuildBrainOptions() {
+    const sig = state.profiles
+      .map((p) => p.id + (p.available ? "" : "!"))
+      .join("|");
+    if (sig === brainOptionsSig) return; // list unchanged — keep the options
+    brainOptionsSig = sig;
+    el.brainSelect.textContent = "";
+    for (const p of state.profiles) {
+      const opt = document.createElement("option");
+      opt.value = p.id;
+      opt.textContent = p.available ? p.id : p.id + " (unavailable)";
+      opt.disabled = !p.available;
+      el.brainSelect.appendChild(opt);
+    }
+  }
+
+  /*
+   * Profile currently shown: the pending request while one is in flight,
+   * else the authoritative snapshot value. Like the mode toggle, a pending
+   * switch is dimmed until the next snapshot confirms (or reverts) it.
+   */
+  function displayedBrain() {
+    return pendingBrain !== null ? pendingBrain : state.brain;
+  }
+
+  function updateBrainUI() {
+    rebuildBrainOptions();
+    const shown = displayedBrain();
+    if (shown !== null && el.brainSelect.value !== shown) {
+      el.brainSelect.value = shown; // no-op for unknown ids (no matching option)
+    }
+    el.brainControl.classList.toggle("pending", pendingBrain !== null);
+  }
+
+  el.brainSelect.addEventListener("change", () => {
+    const id = el.brainSelect.value;
+    if (typeof id !== "string" || id === "" || id === displayedBrain()) return;
+    pendingBrain = id;
+    send({ type: "set_brain", profile: id });
+    el.brainSelect.blur(); // arrows/space stay wired to the game, not the select
+    updateBrainUI();
+  });
+
+  // ------------------------------------------------------------------
+  // Start level stepper (set_level restarts the game at that level)
+  // ------------------------------------------------------------------
+
+  function displayedLevel() {
+    return pendingLevel !== null ? pendingLevel : state.level;
+  }
+
+  function clampLevel(level) {
+    return Math.min(LEVEL_MAX, Math.max(LEVEL_MIN, level));
+  }
+
+  /*
+   * Reflects the start level onto the stepper: value readout, pending dim
+   * and the +/- button bounds. The request stays dimmed until the snapshot
+   * with the fresh board (level=N) arrives.
+   */
+  function updateLevelUI() {
+    el.levelValue.textContent = String(displayedLevel());
+    el.levelControl.classList.toggle("pending", pendingLevel !== null);
+    el.levelDec.disabled = displayedLevel() <= LEVEL_MIN;
+    el.levelInc.disabled = displayedLevel() >= LEVEL_MAX;
+  }
+
+  function requestLevel(level) {
+    const target = clampLevel(Math.round(level));
+    if (!Number.isFinite(target)) return;
+    if (target === displayedLevel()) return; // already the active/requested value
+    pendingLevel = target;
+    send({ type: "set_level", level: target });
+    updateLevelUI();
+  }
+
+  el.levelDec.addEventListener("click", () => {
+    el.levelDec.blur(); // keep arrows/space wired to the game, not the stepper
+    requestLevel(displayedLevel() - 1);
+  });
+  el.levelInc.addEventListener("click", () => {
+    el.levelInc.blur();
+    requestLevel(displayedLevel() + 1);
+  });
+
+  // ------------------------------------------------------------------
   // Message handling
   // ------------------------------------------------------------------
 
@@ -416,6 +562,25 @@
     }
     pendingPause = null; // snapshot reconciles any pending pause change
     updatePauseUI();
+
+    // Server is authoritative on the brain profile and the selectable list;
+    // a missing "brain" or "profiles" key keeps the current values (pre-brain
+    // servers omit them). Unavailable/unknown profiles get no ack from the
+    // server — the snapshot never changes its "brain", so clearing
+    // pendingBrain here reverts the dropdown to the authoritative value.
+    if (typeof snap.brain === "string" && snap.brain !== "") {
+      state.brain = snap.brain;
+    }
+    if (Array.isArray(snap.profiles)) {
+      state.profiles = snap.profiles.filter((p) =>
+        p !== null && typeof p === "object" && typeof p.id === "string");
+    }
+    pendingBrain = null; // snapshot reconciles any pending switch
+    updateBrainUI();
+
+    // The fresh board after a set_level reset carries the new start level.
+    pendingLevel = null; // snapshot reconciles any pending reset
+    updateLevelUI();
 
     if (snap.game_over === true) {
       onGameOver(snap);

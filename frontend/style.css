@@ -296,6 +296,75 @@ body {
   opacity: 0.75;
 }
 
+/* ---------- brain + start-level controls ---------- */
+
+/* Wraps to two rows on narrow/phone layouts instead of overflowing */
+.ctl-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px 18px;
+}
+
+.brain-control,
+.level-control {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.brain-control .player-label {
+  cursor: pointer;
+}
+
+/* Native select styled dark; populated dynamically from the snapshot */
+.brain-select {
+  font-family: inherit;
+  font-size: 11px;
+  letter-spacing: 0.06em;
+  color: var(--text);
+  background: var(--panel);
+  border: 1px solid var(--panel-border);
+  border-radius: 6px;
+  padding: 3px 6px;
+  max-width: 170px;
+  cursor: pointer;
+  transition: border-color 0.15s ease;
+}
+
+.brain-select:hover,
+.brain-select:focus {
+  border-color: var(--violet);
+  outline: none;
+}
+
+.brain-select option {
+  color: var(--text);
+  background: var(--panel);
+}
+
+.brain-select option:disabled {
+  color: var(--muted);
+}
+
+.level-value {
+  font-size: 12px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  color: var(--text);
+  min-width: 14px;
+  text-align: center;
+}
+
+/* Awaiting server confirmation of a brain/level change */
+.brain-control.pending .brain-select,
+.brain-control.pending .player-label,
+.level-control.pending .level-value,
+.level-control.pending .pause-btn,
+.level-control.pending .player-label {
+  opacity: 0.55;
+}
+
 .conn.disconnected {
   color: var(--red);
 }

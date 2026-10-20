@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Tetris — Jev</title>
-  <link rel="stylesheet" href="style.css?v=2">
+  <link rel="stylesheet" href="style.css?v=3">
 </head>
 <body>
   <div class="app">
@@ -22,6 +22,18 @@
             <span id="pause-value" class="pause-value">1.0s</span>
             <button id="pause-dec" class="pause-btn" type="button" aria-label="Decrease pause">−</button>
             <button id="pause-inc" class="pause-btn" type="button" aria-label="Increase pause">+</button>
+          </div>
+          <div class="ctl-row">
+            <div id="brain-control" class="brain-control" role="group" aria-label="LLM brain profile">
+              <label class="player-label" for="brain-select">BRAIN</label>
+              <select id="brain-select" class="brain-select" aria-label="LLM brain profile"></select>
+            </div>
+            <div id="level-control" class="level-control" role="group" aria-label="Start level">
+              <span class="player-label">LEVEL</span>
+              <span id="level-value" class="level-value">1</span>
+              <button id="level-dec" class="pause-btn" type="button" aria-label="Decrease start level">−</button>
+              <button id="level-inc" class="pause-btn" type="button" aria-label="Increase start level">+</button>
+            </div>
           </div>
         </div>
       </div>
@@ -103,6 +115,6 @@
     </main>
   </div>
 
-  <script src="game.js?v=2"></script>
+  <script src="game.js?v=3"></script>
 </body>
 </html>

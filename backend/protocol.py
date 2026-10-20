@@ -34,7 +34,7 @@ COMMANDS = (
 
 # All message types on the wire.
 MESSAGE_TYPES = frozenset(
-    ("snapshot", "game_over", "ack", "resync", "command", "set_mode", "set_jev_pause", "option_request", "option_choice")
+    ("snapshot", "game_over", "ack", "resync", "command", "set_mode", "set_jev_pause", "set_brain", "set_level", "option_request", "option_choice")
 )
 
 # Board serialization alphabet: '.' empty, otherwise a locked piece id.

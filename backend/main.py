@@ -42,6 +42,7 @@ from fastapi.staticfiles import StaticFiles
 from . import protocol
 from .engine.board import HIDDEN_ROWS
 from .engine.game import Game
+from .players import brains
 from .players.llm import build_state, enumerate_placements, pick_best_option, translate
 
 TICK_MS = 1000 / 60  # fixed 60Hz simulation step, in MILLISECONDS (engine dt)
@@ -52,10 +53,11 @@ FRONTEND_DIR = Path(__file__).resolve().parent.parent / "frontend"
 app = FastAPI(title="tetris-jev")
 
 
-def create_game() -> Game:
-    """Fresh game for a new connection. Module-level so tests can monkeypatch
-    backend.main.create_game (e.g. to force a game-over terminal state)."""
-    return Game()
+def create_game(start_level: int = 1) -> Game:
+    """Fresh game for a new connection (or a set_level reset). Module-level
+    so tests can monkeypatch backend.main.create_game (e.g. to force a
+    game-over terminal state); the zero-arg call sites keep working."""
+    return Game(start_level=start_level)
 
 
 class Session:
@@ -64,17 +66,35 @@ class Session:
     Deliberately socket-free: tests drive it with plain dicts/strings.
     """
 
-    def __init__(self, game: Game | None = None, mode: str = "human", brain=None) -> None:
+    def __init__(self, game: Game | None = None, mode: str = "human",
+                 brain=None, config_path: str | None = None) -> None:
         self.game = game if game is not None else create_game()
         self.seq = protocol.SeqCounter()
         self.game_over_notified = False
         self.mode = mode
-        self._brain = brain           # injectable stub for tests; default JevBrain
+        self._config_path = config_path  # env.yaml override for tests
+        self._brain = brain           # injectable stub for tests; default below
+        # The player-selectable profiles (sorted by id, availability marked),
+        # resolved once per connection: a mid-session env.yaml edit does not
+        # rewrite the list the UI was built from.
+        self._profiles = brains.resolve_profiles(config_path)
+        # Current brain profile id ("" = the built-in JevBrain fallback).
+        self._brain_profile = ""
+        if brain is None:
+            pid = brains.default_profile_id(config_path)
+            built = brains.build_brain(pid, config_path) if pid else None
+            if built is not None:
+                self._brain = built
+                self._brain_profile = pid
+            else:
+                # env.yaml missing/broken: keep the classic JevBrain behavior.
+                from .players.jev_api import JevBrain
+
+                self._brain = JevBrain()
+                self._brain_profile = "typesafe_classifier_jev"
         self.jev_pause: float = 1.0   # seconds to wait before each decision
         self._decision_task: asyncio.Task | None = None
         self._last_decision_serial: int | None = None
-        # Seconds Jev "thinks" before deciding on each piece (set_jev_pause).
-        self.jev_pause: float = 1.0
         self._ghost: dict | None = None
         self._ghost_serial: int | None = None
 
@@ -98,6 +118,10 @@ class Session:
         # Top-level in every snapshot, in ALL modes, so the frontend control
         # always shows the authoritative value.
         state["jev_pause"] = self.jev_pause
+        # Brain selector state, in ALL modes: the current profile id and the
+        # player-selectable profiles with availability flags (sorted by id).
+        state["brain"] = self._brain_profile
+        state["profiles"] = [dict(p) for p in self._profiles]
         if self.mode == "jev":
             state["ghost"] = self._ghost
         return protocol.build_snapshot(self.seq.next(), state)
@@ -158,6 +182,39 @@ class Session:
                 # task start; the new value applies from the next piece.
                 return [{"type": "ack"}]
             return []  # non-numeric / missing -> ignored, no ack
+        if mtype == "set_brain":
+            profile = msg.get("profile")
+            if not isinstance(profile, str):
+                return []  # missing / non-string -> ignored, no ack
+            if not self._brain_switch_ok(profile):
+                return []  # unknown or unavailable profile -> brain unchanged
+            built = brains.build_brain(profile, self._config_path)
+            if built is None:
+                return []  # backend unresolvable -> brain unchanged
+            self._brain = built
+            self._brain_profile = profile
+            # An in-flight decision finishes with the brain it captured at
+            # task start; this change applies from the next piece.
+            return [{"type": "ack"}]
+        if mtype == "set_level":
+            level = msg.get("level")
+            # bool is an int subclass but not a sensible level here — reject
+            # it like any other out-of-band payload.
+            if (
+                isinstance(level, int)
+                and not isinstance(level, bool)
+                and 1 <= level <= 10
+            ):
+                self.game = create_game(start_level=level)
+                self._cancel_decision()
+                self._ghost = None
+                self._ghost_serial = None
+                self._last_decision_serial = None
+                # A finished game must not keep the ticker stopped after the
+                # reset; the next tick resumes the sim on the new game.
+                self.game_over_notified = False
+                return [{"type": "ack"}]
+            return []  # non-int / out of range / missing -> ignored, no ack
         if mtype == "resync":
             # Client detected a gap / reconnected: ack plus a fresh full
             # snapshot with the next seq from the same counter.
@@ -184,6 +241,13 @@ class Session:
         if self._decision_task is not None and not self._decision_task.done():
             self._decision_task.cancel()
         self._decision_task = None
+
+    def _brain_switch_ok(self, profile: str) -> bool:
+        """True if the profile is selectable and its backend resolves."""
+        for prof in self._profiles:
+            if prof.get("id") == profile:
+                return bool(prof.get("available", False))
+        return False
 
     def _get_brain(self):
         if self._brain is None:
@@ -216,6 +280,10 @@ class Session:
         # the pause. A cancel (mode switch / game over) interrupts the sleep
         # (CancelledError), and gravity keeps ticking so the stale checks
         # below still drop the decision if the piece locks mid-pause.
+        # The brain is captured HERE, at task start: a set_brain mid-decision
+        # swaps session state, but this task keeps the brain it was given and
+        # finishes the decision with it (spec: do not cancel in-flight).
+        brain = self._get_brain()
         await asyncio.sleep(self.jev_pause)
         try:
             options = enumerate_placements(self.game)
@@ -224,7 +292,7 @@ class Session:
             by_id = {o.id: o for o in options}
             state = build_state(self.game)
             try:
-                choice_id, _probs = await self._get_brain().choose(state, options)
+                choice_id, _probs = await brain.choose(state, options)
             except asyncio.CancelledError:
                 raise
             except Exception:
