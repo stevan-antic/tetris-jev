@@ -7,10 +7,12 @@ Enumeration model
 -----------------
 For the active piece we enumerate every placement reachable by the exact
 command path the player will use: rotation (0-3, no wall kicks — a rotation
-that requires a kick at spawn is skipped so the translated command sequence
-is guaranteed to reproduce the preview) -> horizontal moves -> hard drop,
-from the spawn state (3, 0, rot 0). Each candidate (rotation x column) is
-simulated on a COPY of the live board; the live game is never mutated.
+that requires a kick at the piece's current position is skipped so the
+translated command sequence is guaranteed to reproduce the preview) ->
+horizontal moves -> hard drop, starting from the piece's LIVE position.
+Gravity runs during the decision pause/brain call, so the piece is generally
+no longer at the spawn row when the commands are applied; the reachability
+and landing checks therefore use the live (px, py), not the spawn state.
 
 Because enumeration simulates exactly the command sequence that translate()
 emits, executing the translated commands reproduces the preview board
@@ -80,32 +82,45 @@ def enumerate_placements(game) -> List[Placement]:
         swapped = game.hold if game.hold is not None else game.bag.peek(1)[0]
         variants.append((swapped, True))
 
+    # The piece's LIVE position: gravity runs during the decision pause and
+    # the brain call, so the piece is no longer at the spawn row by the time
+    # translate()'s commands are applied. Every reachability check below must
+    # use this row — checking y=0 (the old behavior) wrongly accepted paths
+    # the stack blocks lower down, and the engine then silently refused the
+    # horizontal moves, so the piece landed short of the target column.
+    px, py = game.px, game.py
+
     options: List[Placement] = []
     for piece, is_hold in variants:
         for rot in range(4):
             shape = cells(piece, rot)
-            # Only rotations that fit at spawn (3, 0) WITHOUT a wall kick are
-            # enumerated — this guarantees the preview invariant (translate()
-            # rotates at spawn, so a kick would shift the piece and break it).
-            if game.board.collides(shape, 3, 0):
+            # Only rotations that fit at the piece's CURRENT position WITHOUT
+            # a wall kick are enumerated — this guarantees the preview
+            # invariant (translate() rotates in place, so a kick would shift
+            # the piece and break it).
+            if game.board.collides(shape, px, py):
                 continue
             for x in range(WIDTH):
-                # The piece must be able to travel from spawn x=3 to x at y=0.
-                dx = x - 3
+                # The piece must be able to travel horizontally from its
+                # current x to x at its current row y.
+                dx = x - px
                 if dx > 0:
                     blocked = any(
-                        game.board.collides(shape, sx, 0) for sx in range(4, x + 1)
+                        game.board.collides(shape, sx, py)
+                        for sx in range(px + 1, x + 1)
                     )
                 elif dx < 0:
                     blocked = any(
-                        game.board.collides(shape, sx, 0) for sx in range(2, x - 1, -1)
+                        game.board.collides(shape, sx, py)
+                        for sx in range(px - 1, x - 1, -1)
                     )
                 else:
                     blocked = False
                 if blocked:
                     continue
-                # Hard-drop simulation: find the landing y.
-                y = 0
+                # Hard-drop simulation: find the landing y from the piece's
+                # CURRENT row (it has already fallen below the spawn row).
+                y = py
                 while not game.board.collides(shape, x, y + 1):
                     y += 1
                 # Lock on a copy, clear the completed rows.
